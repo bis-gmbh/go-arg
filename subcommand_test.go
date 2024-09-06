@@ -1,6 +1,7 @@
 package arg
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -48,6 +49,17 @@ func TestMinimalSubcommand(t *testing.T) {
 	assert.Equal(t, []string{"list"}, p.SubcommandNames())
 }
 
+func TestSubcommandNamesBeforeParsing(t *testing.T) {
+	type listCmd struct{}
+	var args struct {
+		List *listCmd `arg:"subcommand"`
+	}
+	p, err := NewParser(Config{}, &args)
+	require.NoError(t, err)
+	assert.Nil(t, p.Subcommand())
+	assert.Nil(t, p.SubcommandNames())
+}
+
 func TestNoSuchSubcommand(t *testing.T) {
 	type listCmd struct {
 	}
@@ -63,6 +75,19 @@ func TestNamedSubcommand(t *testing.T) {
 	}
 	var args struct {
 		List *listCmd `arg:"subcommand:ls"`
+	}
+	p, err := pparse("ls", &args)
+	require.NoError(t, err)
+	assert.NotNil(t, args.List)
+	assert.Equal(t, args.List, p.Subcommand())
+	assert.Equal(t, []string{"ls"}, p.SubcommandNames())
+}
+
+func TestSubcommandAliases(t *testing.T) {
+	type listCmd struct {
+	}
+	var args struct {
+		List *listCmd `arg:"subcommand:list|ls"`
 	}
 	p, err := pparse("ls", &args)
 	require.NoError(t, err)
@@ -99,6 +124,23 @@ func TestTwoSubcommands(t *testing.T) {
 	assert.NotNil(t, args.List)
 	assert.Equal(t, args.List, p.Subcommand())
 	assert.Equal(t, []string{"list"}, p.SubcommandNames())
+}
+
+func TestTwoSubcommandsWithAliases(t *testing.T) {
+	type getCmd struct {
+	}
+	type listCmd struct {
+	}
+	var args struct {
+		Get  *getCmd  `arg:"subcommand:get|g"`
+		List *listCmd `arg:"subcommand:list|ls"`
+	}
+	p, err := pparse("ls", &args)
+	require.NoError(t, err)
+	assert.Nil(t, args.Get)
+	assert.NotNil(t, args.List)
+	assert.Equal(t, args.List, p.Subcommand())
+	assert.Equal(t, []string{"ls"}, p.SubcommandNames())
 }
 
 func TestSubcommandsWithOptions(t *testing.T) {
@@ -179,6 +221,36 @@ func TestSubcommandsWithOptions(t *testing.T) {
 	}
 }
 
+func TestSubcommandsWithEnvVars(t *testing.T) {
+	type getCmd struct {
+		Name string `arg:"env"`
+	}
+	type listCmd struct {
+		Limit int `arg:"env"`
+	}
+	type cmd struct {
+		Verbose bool
+		Get     *getCmd  `arg:"subcommand"`
+		List    *listCmd `arg:"subcommand"`
+	}
+
+	{
+		var args cmd
+		setenv(t, "LIMIT", "123")
+		err := parse("list", &args)
+		require.NoError(t, err)
+		require.NotNil(t, args.List)
+		assert.Equal(t, 123, args.List.Limit)
+	}
+
+	{
+		var args cmd
+		setenv(t, "LIMIT", "not_an_integer")
+		err := parse("list", &args)
+		assert.Error(t, err)
+	}
+}
+
 func TestNestedSubcommands(t *testing.T) {
 	type child struct{}
 	type parent struct {
@@ -211,6 +283,60 @@ func TestNestedSubcommands(t *testing.T) {
 		require.Nil(t, args.Grandparent.Parent.Child)
 		assert.Equal(t, args.Grandparent.Parent, p.Subcommand())
 		assert.Equal(t, []string{"grandparent", "parent"}, p.SubcommandNames())
+	}
+
+	{
+		var args root
+		p, err := pparse("grandparent", &args)
+		require.NoError(t, err)
+		require.NotNil(t, args.Grandparent)
+		require.Nil(t, args.Grandparent.Parent)
+		assert.Equal(t, args.Grandparent, p.Subcommand())
+		assert.Equal(t, []string{"grandparent"}, p.SubcommandNames())
+	}
+
+	{
+		var args root
+		p, err := pparse("", &args)
+		require.NoError(t, err)
+		require.Nil(t, args.Grandparent)
+		assert.Nil(t, p.Subcommand())
+		assert.Empty(t, p.SubcommandNames())
+	}
+}
+
+func TestNestedSubcommandsWithAliases(t *testing.T) {
+	type child struct{}
+	type parent struct {
+		Child *child `arg:"subcommand:child|ch"`
+	}
+	type grandparent struct {
+		Parent *parent `arg:"subcommand:parent|pa"`
+	}
+	type root struct {
+		Grandparent *grandparent `arg:"subcommand:grandparent|gp"`
+	}
+
+	{
+		var args root
+		p, err := pparse("gp parent child", &args)
+		require.NoError(t, err)
+		require.NotNil(t, args.Grandparent)
+		require.NotNil(t, args.Grandparent.Parent)
+		require.NotNil(t, args.Grandparent.Parent.Child)
+		assert.Equal(t, args.Grandparent.Parent.Child, p.Subcommand())
+		assert.Equal(t, []string{"gp", "parent", "child"}, p.SubcommandNames())
+	}
+
+	{
+		var args root
+		p, err := pparse("grandparent pa", &args)
+		require.NoError(t, err)
+		require.NotNil(t, args.Grandparent)
+		require.NotNil(t, args.Grandparent.Parent)
+		require.Nil(t, args.Grandparent.Parent.Child)
+		assert.Equal(t, args.Grandparent.Parent, p.Subcommand())
+		assert.Equal(t, []string{"grandparent", "pa"}, p.SubcommandNames())
 	}
 
 	{
@@ -352,4 +478,31 @@ func TestSubcommandsWithMultiplePositionals(t *testing.T) {
 		assert.Equal(t, []string{"item1", "item2"}, args.Get.Items)
 		assert.Equal(t, 5, args.Limit)
 	}
+}
+
+func TestValForNilStruct(t *testing.T) {
+	type subcmd struct{}
+	var cmd struct {
+		Sub *subcmd `arg:"subcommand"`
+	}
+
+	p, err := NewParser(Config{}, &cmd)
+	require.NoError(t, err)
+
+	typ := reflect.TypeOf(cmd)
+	subField, _ := typ.FieldByName("Sub")
+
+	v := p.val(path{fields: []reflect.StructField{subField, subField}})
+	assert.False(t, v.IsValid())
+}
+
+func TestSubcommandInvalidInternal(t *testing.T) {
+	// this situation should never arise in practice but still good to test for it
+	var cmd struct{}
+	p, err := NewParser(Config{}, &cmd)
+	require.NoError(t, err)
+
+	p.subcommand = []string{"should", "never", "happen"}
+	sub := p.Subcommand()
+	assert.Nil(t, sub)
 }

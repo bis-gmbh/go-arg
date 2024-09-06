@@ -105,7 +105,7 @@ $ NUM_WORKERS=4 ./example
 Workers: 4
 ```
 
-You can provide multiple values using the CSV (RFC 4180) format:
+You can provide multiple values in environment variables using commas:
 
 ```go
 var args struct {
@@ -118,6 +118,23 @@ fmt.Println("Workers:", args.Workers)
 ```
 $ WORKERS='1,99' ./example
 Workers: [1 99]
+```
+
+Command line arguments take precedence over environment variables:
+
+```go
+var args struct {
+	Workers int `arg:"--count,env:NUM_WORKERS"`
+}
+arg.MustParse(&args)
+fmt.Println("Workers:", args.Workers)
+```
+
+```
+$ NUM_WORKERS=6 ./example
+Workers: 6
+$ NUM_WORKERS=6 ./example --count 4
+Workers: 4
 ```
 
 ### Usage strings
@@ -134,10 +151,10 @@ arg.MustParse(&args)
 
 ```shell
 $ ./example -h
-Usage: [--verbose] [--dataset DATASET] [--optimize OPTIMIZE] [--help] INPUT [OUTPUT [OUTPUT ...]] 
+Usage: [--verbose] [--dataset DATASET] [--optimize OPTIMIZE] [--help] INPUT [OUTPUT [OUTPUT ...]]
 
 Positional arguments:
-  INPUT 
+  INPUT
   OUTPUT
 
 Options:
@@ -158,15 +175,27 @@ var args struct {
 arg.MustParse(&args)
 ```
 
-### Default values (before v1.2)
+Command line arguments take precedence over environment variables, which take precedence over default values. This means that we check whether a certain option was provided on the command line, then if not, we check for an environment variable (only if an `env` tag was provided), then if none is found, we check for a `default` tag containing a default value.
 
 ```go
 var args struct {
-	Foo string
-	Bar bool
+    Test  string `arg:"-t,env:TEST" default:"something"`
 }
-arg.Foo = "abc"
 arg.MustParse(&args)
+```
+
+#### Ignoring environment variables and/or default values
+```go
+var args struct {
+    Test  string `arg:"-t,env:TEST" default:"something"`
+}
+
+p, err := arg.NewParser(arg.Config{
+    IgnoreEnv: true,
+    IgnoreDefault: true,
+}, &args)
+
+err = p.Parse(os.Args)
 ```
 
 ### Arguments with multiple values
@@ -191,6 +220,7 @@ var args struct {
     Files     []string `arg:"-f,separate"`
     Databases []string `arg:"positional"`
 }
+arg.MustParse(&args)
 ```
 
 ```shell
@@ -200,26 +230,21 @@ Files [file1 file2 file3]
 Databases [db1 db2 db3]
 ```
 
-### Custom validation
+### Arguments with keys and values
 ```go
 var args struct {
-	Foo string
-	Bar string
+	UserIDs map[string]int
 }
-p := arg.MustParse(&args)
-if args.Foo == "" && args.Bar == "" {
-	p.Fail("you must provide either --foo or --bar")
-}
+arg.MustParse(&args)
+fmt.Println(args.UserIDs)
 ```
 
 ```shell
-./example
-Usage: samples [--foo FOO] [--bar BAR]
-error: you must provide either --foo or --bar
+./example --userids john=123 mary=456
+map[john:123 mary:456]
 ```
 
 ### Version strings
-
 ```go
 type args struct {
 	...
@@ -240,25 +265,48 @@ $ ./example --version
 someprogram 4.3.0
 ```
 
+> **Note**
+> If a `--version` flag is defined in `args` or any subcommand, it overrides the built-in versioning.
+
+### Custom validation
+```go
+var args struct {
+	Foo string
+	Bar string
+}
+p := arg.MustParse(&args)
+if args.Foo == "" && args.Bar == "" {
+	p.Fail("you must provide either --foo or --bar")
+}
+```
+
+```shell
+./example
+Usage: samples [--foo FOO] [--bar BAR]
+error: you must provide either --foo or --bar
+```
+
 ### Overriding option names
 
 ```go
 var args struct {
-	Short         string  `arg:"-s"`
-	Long          string  `arg:"--custom-long-option"`
-	ShortAndLong  string  `arg:"-x,--my-option"`
+	Short        string `arg:"-s"`
+	Long         string `arg:"--custom-long-option"`
+	ShortAndLong string `arg:"-x,--my-option"`
+	OnlyShort    string `arg:"-o,--"`
 }
 arg.MustParse(&args)
 ```
 
 ```shell
 $ ./example --help
-Usage: [--short SHORT] [--custom-long-option CUSTOM-LONG-OPTION] [--my-option MY-OPTION]
+Usage: example [-o ONLYSHORT] [--short SHORT] [--custom-long-option CUSTOM-LONG-OPTION] [--my-option MY-OPTION]
 
 Options:
   --short SHORT, -s SHORT
   --custom-long-option CUSTOM-LONG-OPTION
   --my-option MY-OPTION, -x MY-OPTION
+  -o ONLYSHORT
   --help, -h             display this help and exit
 ```
 
@@ -290,6 +338,22 @@ func main() {
 ```
 
 As usual, any field tagged with `arg:"-"` is ignored.
+
+### Supported types
+
+The following types may be used as arguments:
+- built-in integer types: `int, int8, int16, int32, int64, byte, rune`
+- built-in floating point types: `float32, float64`
+- strings
+- booleans
+- URLs represented as `url.URL`
+- time durations represented as `time.Duration`
+- email addresses represented as `mail.Address`
+- MAC addresses represented as `net.HardwareAddr`
+- pointers to any of the above
+- slices of any of the above
+- maps using any of the above as keys and values
+- any type that implements `encoding.TextUnmarshaler`
 
 ### Custom parsing
 
@@ -370,8 +434,6 @@ main.NameDotName{Head:"file", Tail:"txt"}
 
 ### Custom placeholders
 
-*Introduced in version 1.3.0*
-
 Use the `placeholder` tag to control which placeholder text is used in the usage text.
 
 ```go
@@ -400,6 +462,9 @@ Options:
 
 ### Description strings
 
+A descriptive message can be added at the top of the help text by implementing
+a `Description` function that returns a string.
+
 ```go
 type args struct {
 	Foo string
@@ -425,9 +490,36 @@ Options:
   --help, -h             display this help and exit
 ```
 
-### Subcommands
+Similarly an epilogue can be added at the end of the help text by implementing
+the `Epilogue` function.
 
-*Introduced in version 1.1.0*
+```go
+type args struct {
+	Foo string
+}
+
+func (args) Epilogue() string {
+	return "For more information visit github.com/alexflint/go-arg"
+}
+
+func main() {
+	var args args
+	arg.MustParse(&args)
+}
+```
+
+```shell
+$ ./example -h
+Usage: example [--foo FOO]
+
+Options:
+  --foo FOO
+  --help, -h             display this help and exit
+
+For more information visit github.com/alexflint/go-arg
+```
+
+### Subcommands
 
 Subcommands are commonly used in tools that wish to group multiple functions into a single program. An example is the `git` tool:
 ```shell
@@ -489,15 +581,187 @@ if p.Subcommand() == nil {
 }
 ```
 
+
+### Custom handling of --help and --version
+
+The following reproduces the internal logic of `MustParse` for the simple case where
+you are not using subcommands or --version. This allows you to respond
+programatically to --help, and to any errors that come up.
+
+```go
+var args struct {
+	Something string
+}
+
+p, err := arg.NewParser(arg.Config{}, &args)
+if err != nil {
+	log.Fatalf("there was an error in the definition of the Go struct: %v", err)
+}
+
+err = p.Parse(os.Args[1:])
+switch {
+case err == arg.ErrHelp:  // indicates that user wrote "--help" on command line
+	p.WriteHelp(os.Stdout)
+	os.Exit(0)
+case err != nil:
+	fmt.Printf("error: %v\n", err)
+	p.WriteUsage(os.Stdout)
+	os.Exit(1)
+}
+```
+
+```shell
+$ go run ./example --help
+Usage: ./example --something SOMETHING
+
+Options:
+  --something SOMETHING
+  --help, -h             display this help and exit
+
+$ ./example --wrong
+error: unknown argument --wrong
+Usage: ./example --something SOMETHING
+
+$ ./example
+error: --something is required
+Usage: ./example --something SOMETHING
+```
+
+To also handle --version programatically, use the following:
+
+```go
+type args struct {
+	Something string
+}
+
+func (args) Version() string {
+	return "1.2.3"
+}
+
+func main() {
+	var args args
+	p, err := arg.NewParser(arg.Config{}, &args)
+	if err != nil {
+		log.Fatalf("there was an error in the definition of the Go struct: %v", err)
+	}
+
+	err = p.Parse(os.Args[1:])
+	switch {
+	case err == arg.ErrHelp: // found "--help" on command line
+		p.WriteHelp(os.Stdout)
+		os.Exit(0)
+	case err == arg.ErrVersion: // found "--version" on command line
+		fmt.Println(args.Version())
+		os.Exit(0)
+	case err != nil:
+		fmt.Printf("error: %v\n", err)
+		p.WriteUsage(os.Stdout)
+		os.Exit(1)
+	}
+
+	fmt.Printf("got %q\n", args.Something)
+}
+```
+
+```shell
+$ ./example --version
+1.2.3
+
+$ go run ./example --help
+1.2.3
+Usage: example --something SOMETHING
+
+Options:
+  --something SOMETHING
+  --help, -h             display this help and exit
+
+$ ./example --wrong
+1.2.3
+error: unknown argument --wrong
+Usage: example --something SOMETHING
+
+$ ./example
+error: --something is required
+Usage: example --something SOMETHING
+```
+
+To generate subcommand-specific help messages, use the following most general version
+(this also works in absence of subcommands but is a bit more complex):
+
+```go
+type fetchCmd struct {
+	Count int
+}
+
+type args struct {
+	Something string
+	Fetch     *fetchCmd `arg:"subcommand"`
+}
+
+func (args) Version() string {
+	return "1.2.3"
+}
+
+func main() {
+	var args args
+	p, err := arg.NewParser(arg.Config{}, &args)
+	if err != nil {
+		log.Fatalf("there was an error in the definition of the Go struct: %v", err)
+	}
+
+	err = p.Parse(os.Args[1:])
+	switch {
+	case err == arg.ErrHelp: // found "--help" on command line
+		p.WriteHelpForSubcommand(os.Stdout, p.SubcommandNames()...)
+		os.Exit(0)
+	case err == arg.ErrVersion: // found "--version" on command line
+		fmt.Println(args.Version())
+		os.Exit(0)
+	case err != nil:
+		fmt.Printf("error: %v\n", err)
+		p.WriteUsageForSubcommand(os.Stdout, p.SubcommandNames()...)
+		os.Exit(1)
+	}
+}```
+
+```shell
+$ ./example --version
+1.2.3
+
+$ ./example --help
+1.2.3
+Usage: example [--something SOMETHING] <command> [<args>]
+
+Options:
+  --something SOMETHING
+  --help, -h             display this help and exit
+  --version              display version and exit
+
+Commands:
+  fetch
+
+$ ./example fetch --help
+1.2.3
+Usage: example fetch [--count COUNT]
+
+Options:
+  --count COUNT
+
+Global options:
+  --something SOMETHING
+  --help, -h             display this help and exit
+  --version              display version and exit
+```
+
 ### API Documentation
 
-https://godoc.org/github.com/alexflint/go-arg
+https://pkg.go.dev/github.com/alexflint/go-arg
 
 ### Rationale
 
 There are many command line argument parsing libraries for Go, including one in the standard library, so why build another?
 
-The `flag` library that ships in the standard library seems awkward to me. Positional arguments must preceed options, so `./prog x --foo=1` does what you expect but `./prog --foo=1 x` does not. It also does not allow arguments to have both long (`--foo`) and short (`-f`) forms.
+The `flag` library that ships in the standard library seems awkward to me. Positional arguments must precede options, so `./prog x --foo=1` does what you expect but `./prog --foo=1 x` does not. It also does not allow arguments to have both long (`--foo`) and short (`-f`) forms.
 
 Many third-party argument parsing libraries are great for writing sophisticated command line interfaces, but feel to me like overkill for a simple script with a few flags.
 
@@ -505,4 +769,4 @@ The idea behind `go-arg` is that Go already has an excellent way to describe dat
 
 ### Backward compatibility notes
 
-Earlier versions of this library required the help text to be part of the `arg` tag. This is still supported but is now deprecated. Instead, you should use a separate `help` tag, described above, which removes most of the limits on the text you can write. In particular, you will need to use the new `help` tag if your help text includes any commas.
+Earlier versions of this library required the help text to be part of the `arg` tag. This is still supported but is now deprecated. Instead, you should use a separate `help` tag, described above, which makes it possible to include commas inside help text.
